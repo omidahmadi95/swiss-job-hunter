@@ -50,6 +50,10 @@ Before completing the merge:
 5. Verify normalized export and Jack dry-run import.
 6. Commit only after all checks pass.
 
+A Hermes no-agent watchdog checks `upstream/main` every Monday at 09:00. It
+stays silent when nothing changed and reports available commits to Jack. It
+never merges or changes the working tree.
+
 Abort an unsafe update with:
 
 ```bash
