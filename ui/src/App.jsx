@@ -463,7 +463,7 @@ export default function App() {
   const [filterMinStars, setFilterMinStars] = useState(0);
   const [coverLetter, setCoverLetter] = useState("");
   const [coverLang, setCoverLang] = useState("en");
-  const [threshold, setThreshold] = useState(10); // percent — shared by archive/purge/filter/lookup
+  const [threshold, setThreshold] = useState(0); // show unscored scraped jobs by default
   const [searchPages, setSearchPages] = useState(3);
   const [keywordPresets, setKeywordPresets] = useState({});
   const [linkedinTimeRange, setLinkedinTimeRange] = useState("r604800");
