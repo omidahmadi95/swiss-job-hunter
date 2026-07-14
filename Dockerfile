@@ -39,4 +39,4 @@ EXPOSE 8765
 
 # Run the API without --reload (production). The package + llm/prompts/*.txt
 # package-data resolve relative to this WORKDIR, so no install step is needed.
-CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8765"]
+CMD ["sh", "-c", "uvicorn server:app --host ${API_HOST:-127.0.0.1} --port ${API_PORT:-8765}"]

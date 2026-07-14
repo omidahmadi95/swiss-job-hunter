@@ -51,14 +51,14 @@ def test_docker_artifact_exists(rel: str) -> None:
 def test_backend_port_is_consistent_everywhere() -> None:
     """server.py, the backend Dockerfile EXPOSE/CMD, and compose must agree."""
     server = _read("server.py")
-    assert f"port={BACKEND_PORT}" in server.replace(" ", "")
+    assert "port=settings.api_port" in server.replace(" ", "")
 
     dockerfile = _read("Dockerfile")
     assert f"EXPOSE {BACKEND_PORT}" in dockerfile
-    assert f'"{BACKEND_PORT}"' in dockerfile  # uvicorn --port in CMD
+    assert str(BACKEND_PORT) in dockerfile  # uvicorn --port in CMD
 
     compose = _read("docker-compose.yml")
-    assert f'"{BACKEND_PORT}:{BACKEND_PORT}"' in compose
+    assert f'"127.0.0.1:{BACKEND_PORT}:{BACKEND_PORT}"' in compose
 
 
 def test_backend_runs_uvicorn_without_reload() -> None:
@@ -116,10 +116,10 @@ def test_compose_passes_api_base_url_with_localhost_default() -> None:
 # ── application touchpoint ──────────────────────────────────────────────────────
 
 
-def test_app_jsx_reads_build_time_api_url_with_fallback() -> None:
+def test_app_jsx_reads_runtime_or_build_time_api_url_with_fallback() -> None:
     app = _read("ui/src/App.jsx")
     assert (
-        'const API = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8765";'
+        'window.__API_BASE_URL__ || import.meta.env.VITE_API_BASE_URL || "http://localhost:8765"'
         in app
     )
 

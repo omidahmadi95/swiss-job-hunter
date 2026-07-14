@@ -33,6 +33,9 @@ async def send_application(
         dry_run: If True, print the email but don't actually send it.
                  Always True by default — pass False explicitly to send.
     """
+    if settings.source_only_mode and not dry_run:
+        raise PermissionError("Real email sending is disabled in source-only mode")
+
     cv_path = cv_pdf_path or settings.cv_pdf_path
 
     # Build email

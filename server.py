@@ -11,14 +11,14 @@ import sys
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import AsyncGenerator, Optional
+from typing import Annotated, AsyncGenerator, Optional
 
 sys.path.insert(0, os.path.dirname(__file__))
 
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func
 
 from config.settings import settings
@@ -27,12 +27,18 @@ app = FastAPI(title="Swiss Job Hunter API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origins,
     allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
-    expose_headers=["*"],
+    expose_headers=[],
 )
+
+
+def require_mutations_enabled() -> None:
+    """Reject operations that are unsafe for a read-only job-source deployment."""
+    if settings.source_only_mode:
+        raise HTTPException(403, "Operation disabled in source-only mode")
 
 
 @app.get("/directions")
@@ -155,6 +161,7 @@ def get_stats(threshold: float = 0.1):
 
 @app.delete("/jobs/{job_id}")
 def delete_job(job_id: int):
+    require_mutations_enabled()
     from db.session import get_session
     from db.models import Job, RawJob, Application, JobEvent
     with get_session() as session:
@@ -170,6 +177,7 @@ def delete_job(job_id: int):
 
 @app.patch("/jobs/{job_id}/stars")
 def update_stars(job_id: int, body: dict):
+    require_mutations_enabled()
     from db.session import get_session
     from db.models import Job
     stars = body.get("stars")
@@ -185,6 +193,7 @@ def update_stars(job_id: int, body: dict):
 
 @app.patch("/jobs/{job_id}/status")
 def update_status(job_id: int, body: dict):
+    require_mutations_enabled()
     from db.session import get_session
     from db.models import Job, JobStatus
     new_status = body.get("status")
@@ -218,17 +227,20 @@ async def sse(gen: AsyncGenerator[str, None]) -> StreamingResponse:
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
-            "Access-Control-Allow-Origin": "*",
         },
     )
 
 
 class SearchRequest(BaseModel):
-    keyword: str = "ML engineer"
-    keywords: list[str] = []  # if non-empty, overrides keyword; each is searched in turn
-    location: str = "Zürich"
-    sources: list[str] = ["jobs.ch"]
-    pages: int = 3
+    keyword: str = Field(default="ML engineer", min_length=1, max_length=200)
+    keywords: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(
+        default_factory=list, max_length=20
+    )
+    location: str = Field(default="Zürich", max_length=200)
+    sources: list[Annotated[str, Field(min_length=1, max_length=100)]] = Field(
+        default_factory=lambda: ["jobs.ch"], max_length=10
+    )
+    pages: int = Field(default=3, ge=1, le=10)
     semantic: bool = False
     direction: Optional[str] = None
     linkedin_time_range: str = "r604800"  # r86400=24h | r604800=7d | r2592000=30d
@@ -337,15 +349,18 @@ async def run_search(req: SearchRequest):
 
 
 class EnrichRequest(BaseModel):
-    limit: int = 50
-    source: str = "jobs.ch"
+    limit: int = Field(default=50, ge=1, le=500)
+    source: str = Field(default="jobs.ch", min_length=1, max_length=100)
     rescore_llm: bool = False
     direction: Optional[str] = None
-    concurrency: int = 3
+    concurrency: int = Field(default=3, ge=1, le=20)
 
 
 @app.post("/run/enrich")
 async def run_enrich(req: EnrichRequest):
+    if req.rescore_llm:
+        require_mutations_enabled()
+
     async def gen():
         from db.models import Job
         from db.session import get_session
@@ -503,18 +518,26 @@ async def run_enrich(req: EnrichRequest):
 
 
 class AnalyzeRequest(BaseModel):
-    limit: int = 100
+    limit: int = Field(default=100, ge=1, le=1000)
     llm: bool = False
-    min_score: float = 0.3
+    min_score: float = Field(default=0.3, ge=0.0, le=1.0)
     skip_scored: bool = True
-    archive_below: float = 0.1  # auto-archive jobs scoring below this (LLM mode only)
-    min_keyword_score: float = 0.10  # skip LLM if keyword pre-filter score < this
+    archive_below: float = Field(default=0.1, ge=0.0, le=1.0)
+    min_keyword_score: float = Field(default=0.10, ge=0.0, le=1.0)
     direction: Optional[str] = None
-    concurrency: int = 10
+    concurrency: int = Field(default=10, ge=1, le=20)
+
+
+def shortlist_threshold(req: AnalyzeRequest) -> float:
+    """Return the caller's threshold unchanged, including for LLM scoring."""
+    return req.min_score
 
 
 @app.post("/run/analyze")
 async def run_analyze(req: AnalyzeRequest):
+    if req.llm:
+        require_mutations_enabled()
+
     async def gen():
         import asyncio
         from asyncio import Queue
@@ -537,11 +560,10 @@ async def run_analyze(req: AnalyzeRequest):
                 query = query.filter(Job.direction == req.direction)
             if req.skip_scored:
                 query = query.filter(Job.match_score.is_(None))
-            lim = req.limit if req.skip_scored else 9999
-            jobs = query.order_by(Job.scraped_at.desc()).limit(lim).all()
+            jobs = query.order_by(Job.scraped_at.desc()).limit(req.limit).all()
             job_data = [(j.id, j.title, j.description) for j in jobs]
 
-        threshold = req.min_score if not req.llm else min(req.min_score, 0.2)
+        threshold = shortlist_threshold(req)
         yield f"Analyzing {len(job_data)} jobs (mode: {'LLM' if req.llm else 'keyword'}, concurrency: {req.concurrency if req.llm else 1})..."
         if not job_data:
             yield "✓ Nothing to score"
@@ -630,16 +652,19 @@ async def run_analyze(req: AnalyzeRequest):
 
 
 class PurgeRequest(BaseModel):
-    max_score: float = 0.1
+    max_score: float = Field(default=0.1, ge=0.0, le=1.0)
     dry_run: bool = True
 
 
 class CheckLinksRequest(BaseModel):
-    statuses: list[str] = ["new", "analyzed", "shortlisted", "viewed", "considering"]
-    concurrency: int = 10
+    statuses: list[str] = Field(
+        default_factory=lambda: ["new", "analyzed", "shortlisted", "viewed", "considering"],
+        max_length=12,
+    )
+    concurrency: int = Field(default=10, ge=1, le=20)
     auto_archive: bool = True
-    timeout: float = 8.0
-    min_score: Optional[float] = None
+    timeout: float = Field(default=8.0, ge=1.0, le=60.0)
+    min_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 
 
 @app.post("/run/check-links")
@@ -751,6 +776,9 @@ async def run_check_links(req: CheckLinksRequest):
 
 @app.post("/run/purge-archived")
 async def run_purge_archived(req: PurgeRequest):
+    if not req.dry_run:
+        require_mutations_enabled()
+
     async def gen():
         from db.models import Job, JobStatus, RawJob, Application, JobEvent
         from db.session import get_session
@@ -837,6 +865,7 @@ async def get_company(name: str):
 
 @app.post("/companies/lookup")
 async def lookup_company(body: dict):
+    require_mutations_enabled()
     from db.session import get_session, init_db
     from db.models import CompanyInfo
     init_db()
@@ -863,11 +892,12 @@ async def lookup_company(body: dict):
 
 
 class CompanyLookupRequest(BaseModel):
-    min_score: float = 0.0
+    min_score: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
 @app.post("/run/company-lookup")
 async def run_company_lookup(req: CompanyLookupRequest = CompanyLookupRequest()):
+    require_mutations_enabled()
     async def gen():
         from db.session import get_session, init_db
         from db.models import Job, CompanyInfo
@@ -912,6 +942,7 @@ class TranslateRequest(BaseModel):
 
 @app.post("/run/translate")
 async def run_translate(req: TranslateRequest):
+    require_mutations_enabled()
     from db.models import Job
     from db.session import get_session
     from llm.router import call_llm
@@ -941,6 +972,7 @@ class CoverRequest(BaseModel):
 
 @app.post("/run/cover")
 async def run_cover(req: CoverRequest):
+    require_mutations_enabled()
     from analyzer.scorer import load_cv_text
     from llm.cover_letter import generate_cover_letter
     from db.models import Job
@@ -965,6 +997,7 @@ class TailorCVRequest(BaseModel):
 
 @app.post("/run/tailor-cv")
 async def run_tailor_cv(req: TailorCVRequest):
+    require_mutations_enabled()
     from analyzer.scorer import load_cv_text
     from llm.cv_tailor import tailor_cv
     from db.models import Job
@@ -983,14 +1016,16 @@ async def run_tailor_cv(req: TailorCVRequest):
 
 
 class ApplyEmailRequest(BaseModel):
-    job_id: int
-    cover_letter: str
+    job_id: int = Field(ge=1)
+    cover_letter: str = Field(max_length=100_000)
     dry_run: bool = True
-    recipient_email: Optional[str] = None
+    recipient_email: Optional[str] = Field(default=None, max_length=320)
 
 
 @app.post("/run/apply/email")
 async def run_apply_email(req: ApplyEmailRequest):
+    require_mutations_enabled()
+
     from applicator.email_apply import send_application
     from db.models import Job
     from db.session import get_session
@@ -1026,7 +1061,7 @@ async def run_apply_email(req: ApplyEmailRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=8765, reload=True)
+    uvicorn.run("server:app", host=settings.api_host, port=settings.api_port, reload=True)
 
 
 # ── Progress tracking endpoints ────────────────────────────────────────────────
@@ -1034,6 +1069,7 @@ if __name__ == "__main__":
 @app.post("/jobs/{job_id}/view")
 def mark_viewed(job_id: int):
     """Auto-called when user opens a job. Sets status=viewed and logs the event."""
+    require_mutations_enabled()
     from db.session import get_session
     from db.models import Job, JobStatus, JobEvent, ApplicationEvent
     with get_session() as session:
@@ -1059,6 +1095,7 @@ def mark_applied(job_id: int, body: dict):
     Mark a job as applied. Records method, contact, note on the Application record
     and adds an APPLIED event to the timeline.
     """
+    require_mutations_enabled()
     from db.session import get_session
     from db.models import Job, JobStatus, Application, ApplicationStatus, JobEvent, ApplicationEvent
     method = body.get("method", "manual")          # email | form | manual | linkedin
@@ -1098,6 +1135,7 @@ def mark_applied(job_id: int, body: dict):
 @app.post("/jobs/{job_id}/events")
 def add_event(job_id: int, body: dict, response: Response):
     """Add any timeline event (interview, offer, rejection, note...)."""
+    require_mutations_enabled()
     from db.session import get_session
     from db.models import Job, JobStatus, JobEvent, ApplicationEvent
     event_type = body.get("event_type")
@@ -1138,7 +1176,6 @@ def add_event(job_id: int, body: dict, response: Response):
             note=note,
             occurred_at=occurred_at,
         ))
-    response.headers["Access-Control-Allow-Origin"] = "*"
     return {"ok": True}
 
 

@@ -49,6 +49,26 @@ class Settings(BaseSettings):
     # ── Database ───────────────────────────────────────────────────────────────
     database_url: str = "sqlite:///./data/jobs.db"
 
+    # ── Local API safety ───────────────────────────────────────────────────────
+    # The API is a local source engine by default. Opting into a non-loopback
+    # bind or application mutations must always be explicit.
+    api_host: str = "127.0.0.1"
+    api_port: int = Field(default=8765, ge=1, le=65535)
+    source_only_mode: bool = True
+    cors_origins: list[str] = Field(
+        default_factory=lambda: [
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        ]
+    )
+
+    @field_validator("cors_origins")
+    @classmethod
+    def reject_wildcard_cors(cls, value: list[str]) -> list[str]:
+        if "*" in value:
+            raise ValueError("CORS_ORIGINS must contain explicit origins, not '*'")
+        return value
+
     # ── Search defaults ────────────────────────────────────────────────────────
     default_keyword: str = "Agent"
     default_location: str = "Zürich"

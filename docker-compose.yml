@@ -11,8 +11,12 @@ services:
     build: .
     image: swiss-job-hunter-backend
     env_file: .env
+    environment:
+      # Explicitly bind inside the container; host publication remains loopback-only.
+      API_HOST: "0.0.0.0"
+      API_PORT: "8765"
     ports:
-      - "8765:8765"
+      - "127.0.0.1:8765:8765"
     volumes:
       # Bind mount: drop cv.txt in from the host, keep the SQLite DB on disk.
       - ./data:/app/data
