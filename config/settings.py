@@ -149,6 +149,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def check_at_least_one_llm(self) -> "Settings":
+        # Scraping and JSON export do not need an LLM. In Jack's default
+        # source-only mode all LLM/CV endpoints are blocked server-side.
+        if self.source_only_mode:
+            return self
         has_cloud = self.anthropic_api_key or self.deepseek_api_key or self.openrouter_api_key
         has_local = bool(self.ollama_base_url)
         if not has_cloud and not has_local:

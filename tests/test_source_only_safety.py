@@ -37,6 +37,30 @@ def test_source_only_is_safe_by_default() -> None:
     assert "*" not in config.cors_origins
 
 
+def test_source_only_scraping_requires_no_llm_api_key() -> None:
+    config = Settings(
+        source_only_mode=True,
+        anthropic_api_key="",
+        deepseek_api_key="",
+        openrouter_api_key="",
+        ollama_base_url="",
+        _env_file=None,
+    )
+    assert config.source_only_mode is True
+
+
+def test_full_mode_still_requires_an_llm_provider() -> None:
+    with pytest.raises(ValidationError, match="At least one LLM provider"):
+        Settings(
+            source_only_mode=False,
+            anthropic_api_key="",
+            deepseek_api_key="",
+            openrouter_api_key="",
+            ollama_base_url="",
+            _env_file=None,
+        )
+
+
 def test_cors_defaults_allow_local_frontend_not_arbitrary_origins(client: TestClient) -> None:
     local = client.options(
         "/config",
